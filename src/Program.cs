@@ -31,25 +31,28 @@ namespace ExeCycler
 
     class CyclerContext : ApplicationContext
     {
-        private NotifyIcon _tray;
-        private Thread _workerThread;
+        private NotifyIcon? _tray;
+        private Thread? _workerThread;
         private volatile bool _running = true;
-        private CyclerConfig _config;
-        private string _configPath;
-        private string _logPath;
-        private string _status = "Başlatılıyor...";
+        private CyclerConfig _config = new CyclerConfig();
+        private string _configPath = "";
+        private string _logPath = "";
+        private string _status = "Baslatiliyor...";
         private int _cycleCount = 0;
         private readonly object _statusLock = new object();
         private readonly object _logLock = new object();
+        private SynchronizationContext? _syncCtx;
 
         public CyclerContext()
         {
-            string appData = Path.Combine(
+            _syncCtx = SynchronizationContext.Current;
+
+            string appData = System.IO.Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                 "ExeCycler");
-            Directory.CreateDirectory(appData);
-            _logPath = Path.Combine(appData, "cyclerlog.txt");
-            _configPath = Path.Combine(
+            System.IO.Directory.CreateDirectory(appData);
+            _logPath = System.IO.Path.Combine(appData, "cyclerlog.txt");
+            _configPath = System.IO.Path.Combine(
                 AppDomain.CurrentDomain.BaseDirectory, "config.json");
 
             InitTray();
@@ -68,9 +71,9 @@ namespace ExeCycler
         {
             var menu = new ContextMenuStrip();
             menu.Items.Add("Durum", null, OnShowStatus);
-            menu.Items.Add("Log dosyasını aç", null, OnOpenLog);
+            menu.Items.Add("Log dosyasini ac", null, OnOpenLog);
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("Çıkış", null, OnExit);
+            menu.Items.Add("Cikis", null, OnExit);
 
             _tray = new NotifyIcon
             {
@@ -87,47 +90,51 @@ namespace ExeCycler
             lock (_statusLock) { _status = s; }
             string tip = "EXE Cycler - " + s;
             if (tip.Length > 63) tip = tip.Substring(0, 63);
-            if (_tray != null)
-                _tray.Invoke((Action)(() => _tray.Text = tip));
+            _syncCtx?.Post(_ =>
+            {
+                if (_tray != null) _tray.Text = tip;
+            }, null);
         }
 
-        private void OnShowStatus(object sender, EventArgs e)
+        private void OnShowStatus(object? sender, EventArgs e)
         {
             string s;
             lock (_statusLock) { s = _status; }
             MessageBox.Show(
-                $"Durum: {s}\nDöngü sayısı: {_cycleCount}\n\nEXE: {_config?.ExePath ?? "-"}\nRun: {_config?.RunSeconds}s | Off: {_config?.OffSeconds}s",
+                "Durum: " + s + "\nDongu sayisi: " + _cycleCount +
+                "\n\nEXE: " + (_config?.ExePath ?? "-") +
+                "\nRun: " + _config?.RunSeconds + "s | Off: " + _config?.OffSeconds + "s",
                 "EXE Cycler", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
-        private void OnOpenLog(object sender, EventArgs e)
+        private void OnOpenLog(object? sender, EventArgs e)
         {
-            if (File.Exists(_logPath))
+            if (System.IO.File.Exists(_logPath))
                 Process.Start(new ProcessStartInfo(_logPath) { UseShellExecute = true });
             else
-                MessageBox.Show("Log dosyası henüz oluşturulmadı.", "EXE Cycler");
+                MessageBox.Show("Log dosyasi henuz olusturulmadi.", "EXE Cycler");
         }
 
-        private void OnExit(object sender, EventArgs e)
+        private void OnExit(object? sender, EventArgs e)
         {
             _running = false;
-            _tray.Visible = false;
-            Log("=== Kullanıcı isteğiyle çıkılıyor ===");
+            if (_tray != null) _tray.Visible = false;
+            Log("=== Kullanici istegi ile cikiliyor ===");
             Application.Exit();
         }
 
         private CyclerConfig LoadOrCreateConfig()
         {
-            if (File.Exists(_configPath))
+            if (System.IO.File.Exists(_configPath))
             {
                 try
                 {
-                    string json = File.ReadAllText(_configPath);
+                    string json = System.IO.File.ReadAllText(_configPath);
                     var cfg = JsonSerializer.Deserialize<CyclerConfig>(json);
                     if (cfg != null)
                     {
-                        Log($"Config yüklendi: {_configPath}");
-                        if (string.IsNullOrEmpty(cfg.ExePath) || !File.Exists(cfg.ExePath))
+                        Log("Config yuklendi: " + _configPath);
+                        if (string.IsNullOrEmpty(cfg.ExePath) || !System.IO.File.Exists(cfg.ExePath))
                         {
                             cfg.ExePath = PickExe();
                             SaveConfig(cfg);
@@ -137,7 +144,7 @@ namespace ExeCycler
                 }
                 catch (Exception ex)
                 {
-                    Log($"Config okuma hatası: {ex.Message}");
+                    Log("Config okuma hatasi: " + ex.Message);
                 }
             }
 
@@ -152,11 +159,11 @@ namespace ExeCycler
             try
             {
                 var opts = new JsonSerializerOptions { WriteIndented = true };
-                File.WriteAllText(_configPath, JsonSerializer.Serialize(cfg, opts));
+                System.IO.File.WriteAllText(_configPath, JsonSerializer.Serialize(cfg, opts));
             }
             catch (Exception ex)
             {
-                Log($"Config kaydetme hatası: {ex.Message}");
+                Log("Config kaydetme hatasi: " + ex.Message);
             }
         }
 
@@ -168,7 +175,7 @@ namespace ExeCycler
                 using var dlg = new OpenFileDialog
                 {
                     Filter = "Uygulamalar (*.exe)|*.exe",
-                    Title = "Döngüde çalıştırılacak EXE'yi seçin"
+                    Title = "Dongu EXE secin"
                 };
                 if (dlg.ShowDialog() == DialogResult.OK)
                     result = dlg.FileName;
@@ -179,13 +186,13 @@ namespace ExeCycler
 
             if (string.IsNullOrEmpty(result))
             {
-                MessageBox.Show("EXE seçilmedi. Program kapanıyor.", "EXE Cycler",
+                MessageBox.Show("EXE secilmedi. Program kapaniyor.", "EXE Cycler",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 Application.Exit();
                 Environment.Exit(0);
             }
 
-            Log($"EXE seçildi: {result}");
+            Log("EXE secildi: " + result);
             return result;
         }
 
@@ -196,44 +203,44 @@ namespace ExeCycler
                 string exePath = Application.ExecutablePath;
                 using var key = Registry.CurrentUser.OpenSubKey(
                     @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true);
-                key?.SetValue("ExeCycler", $"\"{exePath}\"");
+                key?.SetValue("ExeCycler", "\"" + exePath + "\"");
                 Log("Autostart kaydedildi.");
             }
             catch (Exception ex)
             {
-                Log($"Autostart kayıt hatası: {ex.Message}");
+                Log("Autostart kayit hatasi: " + ex.Message);
             }
         }
 
         private void WorkerLoop()
         {
-            Log("=== EXE Cycler başlatıldı ===");
-            Log($"Config: Run={_config.RunSeconds}s, Off={_config.OffSeconds}s, " +
-                $"Heartbeat={_config.HeartbeatSeconds}s, EXE={_config.ExePath}");
+            Log("=== EXE Cycler baslatildi ===");
+            Log("Config: Run=" + _config.RunSeconds + "s, Off=" + _config.OffSeconds + "s, " +
+                "Heartbeat=" + _config.HeartbeatSeconds + "s, EXE=" + _config.ExePath);
 
             while (_running)
             {
                 _cycleCount++;
-                Log($"=== DÖNGÜ {_cycleCount} BAŞLADI ===");
-                SetStatus($"Döngü {_cycleCount} - EXE başlatılıyor");
+                Log("=== DONGU " + _cycleCount + " BASLADI ===");
+                SetStatus("Dongu " + _cycleCount + " - EXE baslatiliyor");
 
                 if (GetProcessCount() == 0)
                 {
-                    bool started = StartExe("Döngü başlangıcı");
+                    bool started = StartExe("Dongu baslangici");
                     if (!started)
                     {
-                        Log($"Başlatma başarısız. {_config.OffSeconds}s bekleniyor.");
-                        SetStatus("Başlatma hatası - bekleniyor");
+                        Log("Baslatma basarisiz. " + _config.OffSeconds + "s bekleniyor.");
+                        SetStatus("Baslatma hatasi - bekleniyor");
                         SleepCancellable(_config.OffSeconds * 1000);
                         continue;
                     }
                 }
                 else
                 {
-                    Log("EXE zaten çalışıyor.");
+                    Log("EXE zaten calisiyor.");
                 }
 
-                SetStatus($"Döngü {_cycleCount} - RUN ({_config.RunSeconds}s)");
+                SetStatus("Dongu " + _cycleCount + " - RUN (" + _config.RunSeconds + "s)");
                 var runEnd = DateTime.UtcNow.AddSeconds(_config.RunSeconds);
 
                 while (DateTime.UtcNow < runEnd && _running)
@@ -244,19 +251,19 @@ namespace ExeCycler
                     int cnt = GetProcessCount();
                     if (cnt == 0)
                     {
-                        Log("HEARTBEAT: EXE çalışmıyor -> yeniden başlatılıyor");
-                        StartExe("RUN fazında EXE kapandı");
+                        Log("HEARTBEAT: EXE calısmiyor -> yeniden baslatiliyor");
+                        StartExe("RUN fazinda EXE kapandi");
                     }
                 }
 
                 if (!_running) break;
 
-                Log("RUN süresi doldu. EXE durduruluyor.");
-                SetStatus($"Döngü {_cycleCount} - durduruluyor");
+                Log("RUN suresi doldu. EXE durduruluyor.");
+                SetStatus("Dongu " + _cycleCount + " - durduruluyor");
                 StopExe();
 
-                Log($"OFF fazı: {_config.OffSeconds}s bekleniyor");
-                SetStatus($"Döngü {_cycleCount} - OFF ({_config.OffSeconds}s)");
+                Log("OFF fazi: " + _config.OffSeconds + "s bekleniyor");
+                SetStatus("Dongu " + _cycleCount + " - OFF (" + _config.OffSeconds + "s)");
                 SleepCancellable(_config.OffSeconds * 1000);
             }
 
@@ -265,7 +272,7 @@ namespace ExeCycler
 
         private int GetProcessCount()
         {
-            string exeName = Path.GetFileNameWithoutExtension(_config.ExePath);
+            string exeName = System.IO.Path.GetFileNameWithoutExtension(_config.ExePath);
             string targetLow = _config.ExePath.ToLowerInvariant();
             int count = 0;
             foreach (var p in Process.GetProcessesByName(exeName))
@@ -283,30 +290,30 @@ namespace ExeCycler
 
         private bool StartExe(string reason)
         {
-            Log($"START: {reason}");
+            Log("START: " + reason);
             try
             {
                 var psi = new ProcessStartInfo
                 {
                     FileName = _config.ExePath,
-                    WorkingDirectory = Path.GetDirectoryName(_config.ExePath),
+                    WorkingDirectory = System.IO.Path.GetDirectoryName(_config.ExePath),
                     WindowStyle = ProcessWindowStyle.Minimized,
                     UseShellExecute = true
                 };
                 var p = Process.Start(psi);
-                Log($"START: başarılı PID={p?.Id}");
+                Log("START: basarili PID=" + p?.Id);
                 return true;
             }
             catch (Exception ex)
             {
-                Log($"START HATASI: {ex.Message}");
+                Log("START HATASI: " + ex.Message);
                 return false;
             }
         }
 
         private void StopExe()
         {
-            string exeName = Path.GetFileNameWithoutExtension(_config.ExePath);
+            string exeName = System.IO.Path.GetFileNameWithoutExtension(_config.ExePath);
             string targetLow = _config.ExePath.ToLowerInvariant();
             var processes = new System.Collections.Generic.List<Process>();
 
@@ -324,7 +331,7 @@ namespace ExeCycler
 
             if (processes.Count == 0)
             {
-                Log("STOP: zaten çalışmıyor.");
+                Log("STOP: zaten calısmiyor.");
                 return;
             }
 
@@ -344,7 +351,7 @@ namespace ExeCycler
                 Thread.Sleep(250);
                 if (GetProcessCount() == 0)
                 {
-                    Log("STOP: graceful başarılı.");
+                    Log("STOP: graceful basarili.");
                     foreach (var p in processes) p.Dispose();
                     return;
                 }
@@ -352,17 +359,17 @@ namespace ExeCycler
 
             foreach (var p in processes)
             {
-                try { p.Kill(); Log($"STOP: kill PID={p.Id}"); }
-                catch (Exception ex) { Log($"STOP: kill hatası PID={p.Id} - {ex.Message}"); }
+                try { p.Kill(); Log("STOP: kill PID=" + p.Id); }
+                catch (Exception ex) { Log("STOP: kill hatasi PID=" + p.Id + " - " + ex.Message); }
                 finally { p.Dispose(); }
             }
 
             Thread.Sleep(500);
             int final = GetProcessCount();
             if (final == 0)
-                Log("STOP: force kill başarılı.");
+                Log("STOP: force kill basarili.");
             else
-                Log($"STOP: UYARI - {final} process hala çalışıyor!");
+                Log("STOP: UYARI - " + final + " process hala calisiyor!");
         }
 
         private void SleepCancellable(int ms)
@@ -378,11 +385,11 @@ namespace ExeCycler
 
         private void Log(string message)
         {
-            string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}";
+            string line = "[" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "] " + message;
             try
             {
                 lock (_logLock)
-                    File.AppendAllText(_logPath, line + Environment.NewLine,
+                    System.IO.File.AppendAllText(_logPath, line + Environment.NewLine,
                         System.Text.Encoding.UTF8);
             }
             catch { }
