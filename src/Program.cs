@@ -95,8 +95,8 @@ namespace AutoStart
     class CyclerConfig
     {
         public string ExePath { get; set; } = "";
-        public int RunSeconds { get; set; } = 600;
-        public int OffSeconds { get; set; } = 10;
+        public int RunMinutes { get; set; } = 10;
+        public int OffMinutes { get; set; } = 1;
         public int HeartbeatSeconds { get; set; } = 30;
         public int StopWaitSeconds { get; set; } = 5;
         public bool AutoUpdate { get; set; } = true;
@@ -264,12 +264,12 @@ namespace AutoStart
             };
             y += 38;
 
-            var lblRun = new Label { Text = "Run duration (sec):", Left = 20, Top = y + 3, Width = 160 };
-            var txtRun = new TextBox { Text = _config.RunSeconds.ToString(), Left = 190, Top = y, Width = 80 };
+            var lblRun = new Label { Text = "Run duration (min):", Left = 20, Top = y + 3, Width = 160 };
+            var txtRun = new TextBox { Text = _config.RunMinutes.ToString(), Left = 190, Top = y, Width = 80 };
             y += 35;
 
-            var lblOff = new Label { Text = "Off duration (sec):", Left = 20, Top = y + 3, Width = 160 };
-            var txtOff = new TextBox { Text = _config.OffSeconds.ToString(), Left = 190, Top = y, Width = 80 };
+            var lblOff = new Label { Text = "Off duration (min):", Left = 20, Top = y + 3, Width = 160 };
+            var txtOff = new TextBox { Text = _config.OffMinutes.ToString(), Left = 190, Top = y, Width = 80 };
             y += 35;
 
             var chkUpdate = new CheckBox { Text = "Auto-update", Left = 190, Top = y, Width = 260, Checked = _config.AutoUpdate };
@@ -281,8 +281,8 @@ namespace AutoStart
             var btnSave = new Button { Text = "Save", Left = 190, Top = y, Width = 110, Height = 28 };
             btnSave.Click += (s, ev) =>
             {
-                if (int.TryParse(txtRun.Text, out int r) && r > 0) _config.RunSeconds = r;
-                if (int.TryParse(txtOff.Text, out int o) && o >= 0) _config.OffSeconds = o;
+                if (int.TryParse(txtRun.Text, out int r) && r > 0) _config.RunMinutes = r;
+                if (int.TryParse(txtOff.Text, out int o) && o >= 0) _config.OffMinutes = o;
                 _config.AutoUpdate = chkUpdate.Checked;
                 _config.MinimizeTarget = chkMin.Checked;
                 SaveConfig(_config);
@@ -510,7 +510,7 @@ namespace AutoStart
         private void WorkerLoop()
         {
             Log("=== AutoStart v" + CURRENT_VERSION + " started ===");
-            Log("Config: Run=" + _config.RunSeconds + "s, Off=" + _config.OffSeconds + "s, EXE=" + _config.ExePath);
+            Log("Config: Run=" + _config.RunMinutes + "min, Off=" + _config.OffMinutes + "min, EXE=" + _config.ExePath);
 
             while (_running)
             {
@@ -530,16 +530,16 @@ namespace AutoStart
                 {
                     if (!StartExe("Cycle start"))
                     {
-                        Log("Launch failed. Waiting " + _config.OffSeconds + "s.");
+                        Log("Launch failed. Waiting " + _config.OffMinutes + " min.");
                         SetStatus("Launch failed - waiting");
-                        SleepCancellable(_config.OffSeconds * 1000);
+                        SleepCancellable(_config.OffMinutes * 60 * 1000);
                         continue;
                     }
                 }
                 else Log("EXE already running.");
 
-                SetStatus("Cycle " + _cycleCount + " - running (" + _config.RunSeconds + "s)");
-                var runEnd = DateTime.UtcNow.AddSeconds(_config.RunSeconds);
+                SetStatus("Cycle " + _cycleCount + " - running (" + _config.RunMinutes + " min)");
+                var runEnd = DateTime.UtcNow.AddSeconds(_config.RunMinutes * 60);
                 while (DateTime.UtcNow < runEnd && _running)
                 {
                     SleepCancellable(_config.HeartbeatSeconds * 1000);
@@ -557,8 +557,8 @@ namespace AutoStart
                 SetStatus("Cycle " + _cycleCount + " - stopping");
                 StopExe();
 
-                Log("Off phase: " + _config.OffSeconds + "s");
-                SetStatus("Cycle " + _cycleCount + " - off (" + _config.OffSeconds + "s)");
+                Log("Off phase: " + _config.OffMinutes + " min");
+                SetStatus("Cycle " + _cycleCount + " - off (" + _config.OffMinutes + " min)");
                 SleepCancellable(_config.OffSeconds * 1000);
             }
             Log("=== Worker stopped ===");
