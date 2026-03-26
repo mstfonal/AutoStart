@@ -6,8 +6,8 @@
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
-    <AssemblyName>ExeCycler</AssemblyName>
-    <RootNamespace>ExeCycler</RootNamespace>
+    <AssemblyName>AutoStart</AssemblyName>
+    <RootNamespace>AutoStart</RootNamespace>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
