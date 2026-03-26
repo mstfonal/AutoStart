@@ -34,15 +34,23 @@ namespace AutoStart
                 return;
             }
 
-            if (args.Length > 0 && args[0] == "--updated")
-                Thread.Sleep(1500);
-
             // Tek instance kontrolü
-            bool createdNew;
-            _mutex = new Mutex(true, "AutoStart_SingleInstance", out createdNew);
+            // --updated ise eski process kapanana kadar bekle (max 10 deneme)
+            bool isUpdate = args.Length > 0 && args[0] == "--updated";
+            bool createdNew = false;
+            int mutexRetries = isUpdate ? 10 : 1;
+            for (int i = 0; i < mutexRetries; i++)
+            {
+                _mutex = new Mutex(true, "AutoStart_SingleInstance", out createdNew);
+                if (createdNew) break;
+                _mutex.Dispose();
+                _mutex = null;
+                Thread.Sleep(1000); // eski process kapansın diye bekle
+            }
             if (!createdNew)
             {
-                MessageBox.Show("AutoStart is already running.\nCheck the system tray.", "AutoStart", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                if (!isUpdate)
+                    MessageBox.Show("AutoStart is already running.\nCheck the system tray.", "AutoStart", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
