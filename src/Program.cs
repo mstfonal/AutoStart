@@ -11,7 +11,7 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-namespace ExeCycler
+namespace AutoStart
 {
     static class Program
     {
@@ -96,7 +96,7 @@ namespace ExeCycler
         public CyclerContext()
         {
             _syncCtx = SynchronizationContext.Current;
-            string appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "ExeCycler");
+            string appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "AutoStart");
             Directory.CreateDirectory(appData);
             _logPath = Path.Combine(appData, "cyclerlog.txt");
             _configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
@@ -141,7 +141,7 @@ namespace ExeCycler
             _tray = new NotifyIcon
             {
                 Icon = CreateAppIcon(),
-                Text = "EXE Cycler v" + CURRENT_VERSION,
+                Text = "AutoStart v" + CURRENT_VERSION,
                 ContextMenuStrip = menu,
                 Visible = true
             };
@@ -151,7 +151,7 @@ namespace ExeCycler
         private void SetStatus(string s)
         {
             lock (_statusLock) { _status = s; }
-            string tip = "EXE Cycler v" + CURRENT_VERSION + " - " + s;
+            string tip = "AutoStart v" + CURRENT_VERSION + " - " + s;
             if (tip.Length > 63) tip = tip.Substring(0, 63);
             _syncCtx?.Post(_ => { if (_tray != null) _tray.Text = tip; }, null);
         }
@@ -173,19 +173,22 @@ namespace ExeCycler
                 "\nRun: " + _config?.RunSeconds + "s  |  Off: " + _config?.OffSeconds + "s" +
                 "\nAuto-update: " + (_config?.AutoUpdate == true ? "On" : "Off") +
                 "\nMinimize target: " + (_config?.MinimizeTarget == true ? "On" : "Off"),
-                "EXE Cycler", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                "AutoStart", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         private void OnShowSettings(object? sender, EventArgs e)
         {
-            _syncCtx?.Post(_ => ShowSettingsForm(), null);
+            if (_syncCtx != null)
+                _syncCtx.Post(_ => ShowSettingsForm(), null);
+            else
+                ShowSettingsForm();
         }
 
         private void ShowSettingsForm()
         {
             var form = new Form
             {
-                Text = "EXE Cycler - Settings",
+                Text = "AutoStart - Settings",
                 Width = 480, Height = 330,
                 FormBorderStyle = FormBorderStyle.FixedDialog,
                 MaximizeBox = false, MinimizeBox = false,
@@ -206,7 +209,7 @@ namespace ExeCycler
                     SaveConfig(_config);
                     lblExePath.Text = Path.GetFileName(picked);
                     Log("EXE changed: " + picked);
-                    MessageBox.Show("EXE updated:\n" + picked + "\n\nTakes effect on next cycle.", "EXE Cycler", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    MessageBox.Show("EXE updated:\n" + picked + "\n\nTakes effect on next cycle.", "AutoStart", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
             };
             y += 38;
@@ -229,7 +232,7 @@ namespace ExeCycler
                 _config.MinimizeTarget = chkMin.Checked;
                 SaveConfig(_config);
                 Log("Settings saved.");
-                MessageBox.Show("Settings saved.", "EXE Cycler", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("Settings saved.", "AutoStart", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 form.Close();
             };
             var btnCancel = new Button { Text = "Cancel", Left = 310, Top = y, Width = 100, Height = 28 };
@@ -244,14 +247,14 @@ namespace ExeCycler
             {
                 var info = CheckForUpdate();
                 if (info != null) ApplyUpdate(info);
-                else ShowBalloon("EXE Cycler", "No update available. Version: " + CURRENT_VERSION);
+                else ShowBalloon("AutoStart", "No update available. Version: " + CURRENT_VERSION);
             }) { IsBackground = true }.Start();
         }
 
         private void OnOpenLog(object? sender, EventArgs e)
         {
             if (File.Exists(_logPath)) Process.Start(new ProcessStartInfo(_logPath) { UseShellExecute = true });
-            else MessageBox.Show("Log file not created yet.", "EXE Cycler");
+            else MessageBox.Show("Log file not created yet.", "AutoStart");
         }
 
         private void OnExit(object? sender, EventArgs e)
@@ -273,7 +276,7 @@ namespace ExeCycler
                     if (info != null)
                     {
                         Log("Update found: " + info.TagName);
-                        ShowBalloon("EXE Cycler - Update", "New version: " + info.TagName + "  Current: " + CURRENT_VERSION + "  Applying in 60s...");
+                        ShowBalloon("AutoStart - Update", "New version: " + info.TagName + "  Current: " + CURRENT_VERSION + "  Applying in 60s...");
                         for (int i = 0; i < 120 && _running; i++) Thread.Sleep(500);
                         if (_running) ApplyUpdate(info);
                     }
@@ -313,10 +316,10 @@ namespace ExeCycler
         {
             string currentExe = Application.ExecutablePath;
             string exeDir = Path.GetDirectoryName(currentExe) ?? AppDomain.CurrentDomain.BaseDirectory;
-            string backupPath = Path.Combine(exeDir, "ExeCycler_backup.exe");
-            string tempPath = Path.Combine(exeDir, "ExeCycler_new.exe");
+            string backupPath = Path.Combine(exeDir, "AutoStart_backup.exe");
+            string tempPath = Path.Combine(exeDir, "AutoStart_new.exe");
             Log("Applying update: " + info.TagName);
-            ShowBalloon("EXE Cycler", "Downloading update " + info.TagName + "...");
+            ShowBalloon("AutoStart", "Downloading update " + info.TagName + "...");
             try
             {
                 using var client = new HttpClient();
@@ -356,7 +359,7 @@ namespace ExeCycler
             {
                 Log("UPDATE ERROR: " + ex.Message);
                 try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
-                ShowBalloon("EXE Cycler - Update Failed", ex.Message, ToolTipIcon.Error);
+                ShowBalloon("AutoStart - Update Failed", ex.Message, ToolTipIcon.Error);
             }
         }
 
@@ -410,7 +413,7 @@ namespace ExeCycler
             t.Start(); t.Join();
             if (string.IsNullOrEmpty(result))
             {
-                MessageBox.Show("No EXE selected. Exiting.", "EXE Cycler", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("No EXE selected. Exiting.", "AutoStart", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 Application.Exit(); Environment.Exit(0);
             }
             Log("EXE selected: " + result);
@@ -422,7 +425,7 @@ namespace ExeCycler
             try
             {
                 using var key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true);
-                key?.SetValue("ExeCycler", "\"" + Application.ExecutablePath + "\"");
+                key?.SetValue("AutoStart", "\"" + Application.ExecutablePath + "\"");
                 Log("Autostart registered.");
             }
             catch (Exception ex) { Log("Autostart error: " + ex.Message); }
@@ -430,7 +433,7 @@ namespace ExeCycler
 
         private void WorkerLoop()
         {
-            Log("=== EXE Cycler v" + CURRENT_VERSION + " started ===");
+            Log("=== AutoStart v" + CURRENT_VERSION + " started ===");
             Log("Config: Run=" + _config.RunSeconds + "s, Off=" + _config.OffSeconds + "s, EXE=" + _config.ExePath);
             while (_running)
             {
