@@ -97,9 +97,17 @@ namespace AutoStart
         public static extern IntPtr FindWindow(string? lpClassName, string lpWindowName);
         [DllImport("user32.dll")]
         public static extern bool IsWindowVisible(IntPtr hWnd);
+        [DllImport("user32.dll")]
+        public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll")]
+        public static extern bool EnumChildWindows(IntPtr hwndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder lpString, int nMaxCount);
+        public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
         public const int SW_MINIMIZE = 6;
         public const int SW_SHOWMINNOACTIVE = 7;
         public const int SW_HIDE = 0;
+        public const uint WM_CLOSE = 0x0010;
     }
 
     class CyclerConfig
@@ -685,13 +693,15 @@ namespace AutoStart
 
                 if (_config.MinimizeTarget && p != null)
                 {
-                    // Bazi uygulamalar WindowStyle'i gormezden gelir, o yuzden WinAPI ile de basiyor
                     var proc = p;
                     new Thread(() =>
                     {
                         try
                         {
-                            // 15 saniye boyunca her 200ms'de bir dene
+                            // Once popup'i kapat (max 10 saniye bekle)
+                            ClosePopupWindow("LP Online Order Services", 10);
+
+                            // Sonra ana pencereyi minimize et (15 saniye)
                             var deadline = DateTime.UtcNow.AddSeconds(15);
                             bool minimized = false;
                             while (DateTime.UtcNow < deadline && !minimized)
@@ -720,6 +730,25 @@ namespace AutoStart
                 return true;
             }
             catch (Exception ex) { Log("START ERROR: " + ex.Message); return false; }
+        }
+
+        // Belirtilen baslikli popup pencereyi guvenli sekilde kapatir
+        // Sadece WM_CLOSE gonderir - process devam eder
+        private void ClosePopupWindow(string windowTitle, int waitSeconds)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(waitSeconds);
+            while (DateTime.UtcNow < deadline)
+            {
+                Thread.Sleep(300);
+                IntPtr hwnd = NativeMethods.FindWindow(null, windowTitle);
+                if (hwnd != IntPtr.Zero && NativeMethods.IsWindowVisible(hwnd))
+                {
+                    NativeMethods.SendMessage(hwnd, NativeMethods.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                    Log("Popup closed: " + windowTitle);
+                    return;
+                }
+            }
+            Log("Popup not found: " + windowTitle);
         }
 
         private void StopExe()
