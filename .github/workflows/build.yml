@@ -44,6 +44,8 @@ jobs:
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: src/bin/Release/net8.0-windows/win-x64/publish/AutoStart.zip
+          files: |
+            src/bin/Release/net8.0-windows/win-x64/publish/AutoStart.exe
+            src/bin/Release/net8.0-windows/win-x64/publish/AutoStart.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
