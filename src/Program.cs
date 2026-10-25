@@ -27,10 +27,9 @@ namespace AutoStart
                 if (e.ExceptionObject is Exception ex) LogUnhandled(ex);
             };
 
-            if (args.Length > 0 && args[0] == "--rollback")
+            if (args.Length > 0 && args[0] == "--install-update")
             {
-                string backupPath = args.Length > 1 ? args[1] : "";
-                PerformRollback(backupPath);
+                Environment.ExitCode = UpdateInstaller.Run(args);
                 return;
             }
 
@@ -56,7 +55,8 @@ namespace AutoStart
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new CyclerContext());
 
-            _mutex.ReleaseMutex();
+            _mutex!.ReleaseMutex();
+            _mutex.Dispose();
         }
 
         private static void LogUnhandled(Exception ex)
@@ -71,44 +71,8 @@ namespace AutoStart
             catch { }
         }
 
-        private static void PerformRollback(string backupPath)
-        {
-            try
-            {
-                string currentExe = Application.ExecutablePath;
-                if (!string.IsNullOrEmpty(backupPath) && File.Exists(backupPath))
-                {
-                    Thread.Sleep(1500);
-                    File.Copy(backupPath, currentExe, overwrite: true);
-                    Process.Start(new ProcessStartInfo(currentExe) { UseShellExecute = true });
-                }
-            }
-            catch { }
-        }
     }
 
-    static class NativeMethods
-    {
-        [DllImport("user32.dll")]
-        public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-        [DllImport("user32.dll")]
-        public static extern bool SetForegroundWindow(IntPtr hWnd);
-        [DllImport("user32.dll")]
-        public static extern IntPtr FindWindow(string? lpClassName, string lpWindowName);
-        [DllImport("user32.dll")]
-        public static extern bool IsWindowVisible(IntPtr hWnd);
-        [DllImport("user32.dll")]
-        public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
-        [DllImport("user32.dll")]
-        public static extern bool EnumChildWindows(IntPtr hwndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder lpString, int nMaxCount);
-        public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-        public const int SW_MINIMIZE = 6;
-        public const int SW_SHOWMINNOACTIVE = 7;
-        public const int SW_HIDE = 0;
-        public const uint WM_CLOSE = 0x0010;
-    }
 
     class CyclerConfig
     {
@@ -125,6 +89,8 @@ namespace AutoStart
     {
         public string TagName { get; set; } = "";
         public string DownloadUrl { get; set; } = "";
+        public string Sha256 { get; set; } = "";
+        public bool IsZip { get; set; }
     }
 
     class CyclerContext : ApplicationContext
@@ -138,7 +104,10 @@ namespace AutoStart
         private Thread? _workerThread;
         private Thread? _updateThread;
         private volatile bool _running = true;
-        private CyclerConfig _config = new CyclerConfig();
+        private volatile CyclerConfig _config = new CyclerConfig();
+        private TargetWindowMonitor? _windowMonitor;
+        private int _updateInProgress;
+        private volatile string _activeTargetPath = "";
         private string _configPath = "";
         private string _logPath = "";
         private string _status = "Starting...";
@@ -149,7 +118,9 @@ namespace AutoStart
 
         public CyclerContext()
         {
-            _syncCtx = SynchronizationContext.Current;
+            // ApplicationContext is constructed before Application.Run installs a context.
+            _syncCtx = new WindowsFormsSynchronizationContext();
+            SynchronizationContext.SetSynchronizationContext(_syncCtx);
 
             string appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "AutoStart");
             Directory.CreateDirectory(appData);
@@ -165,11 +136,14 @@ namespace AutoStart
             InitTray();
             RegisterAutostart();
             _config = LoadOrCreateConfig();
+            NormalizeConfig(_config);
+            _windowMonitor = new TargetWindowMonitor(() => _running && _config.MinimizeTarget,
+                pid => TargetProcesses.Matches(pid, string.IsNullOrEmpty(_activeTargetPath) ? _config.ExePath : _activeTargetPath), Log);
 
             _workerThread = new Thread(WorkerLoop) { IsBackground = true, Name = "CyclerWorker" };
             _workerThread.Start();
 
-            if (_config.AutoUpdate)
+            // Always start the checker so changing the checkbox works without a restart.
             {
                 _updateThread = new Thread(UpdateLoop) { IsBackground = true, Name = "UpdateChecker" };
                 _updateThread.Start();
@@ -249,6 +223,9 @@ namespace AutoStart
                 Width = 480,
                 Height = 340,
                 FormBorderStyle = FormBorderStyle.FixedDialog,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(0, 0, 0, 15),
                 MaximizeBox = false,
                 MinimizeBox = false,
                 StartPosition = FormStartPosition.CenterScreen,
@@ -268,7 +245,14 @@ namespace AutoStart
                 string picked = PickExe(required: false);
                 if (!string.IsNullOrEmpty(picked))
                 {
-                    _config.ExePath = picked;
+                    if (TargetProcesses.SamePath(picked, Application.ExecutablePath))
+                    {
+                        MessageBox.Show("Select the order program, not AutoStart itself.", "AutoStart");
+                        return;
+                    }
+                    var changed = CloneConfig(_config);
+                    changed.ExePath = picked;
+                    _config = changed;
                     SaveConfig(_config);
                     lblExePath.Text = Path.GetFileName(picked);
                     Log("EXE changed: " + picked);
@@ -288,17 +272,26 @@ namespace AutoStart
             var chkUpdate = new CheckBox { Text = "Auto-update", Left = 190, Top = y, Width = 260, Checked = _config.AutoUpdate };
             y += 28;
 
-            var chkMin = new CheckBox { Text = "Minimize target window", Left = 190, Top = y, Width = 260, Checked = _config.MinimizeTarget };
+            var chkMin = new CheckBox { Text = "Keep target in background", Left = 190, Top = y, Width = 260, Checked = _config.MinimizeTarget };
             y += 40;
 
             var btnSave = new Button { Text = "Save", Left = 190, Top = y, Width = 110, Height = 28 };
             btnSave.Click += (s, ev) =>
             {
-                if (int.TryParse(txtRun.Text, out int r) && r > 0) _config.RunMinutes = r;
-                if (int.TryParse(txtOff.Text, out int o) && o >= 0) _config.OffMinutes = o;
-                _config.AutoUpdate = chkUpdate.Checked;
-                _config.MinimizeTarget = chkMin.Checked;
-                SaveConfig(_config);
+                if (!int.TryParse(txtRun.Text, out int r) || r < 1 || r > 10080 ||
+                    !int.TryParse(txtOff.Text, out int o) || o < 0 || o > 10080)
+                {
+                    MessageBox.Show("Run must be 1–10080 minutes; off must be 0–10080 minutes.", "AutoStart");
+                    return;
+                }
+                var changed = CloneConfig(_config);
+                changed.RunMinutes = r;
+                changed.OffMinutes = o;
+                changed.AutoUpdate = chkUpdate.Checked;
+                changed.MinimizeTarget = chkMin.Checked;
+                _config = changed;
+                SaveConfig(changed);
+                _windowMonitor?.Sweep();
                 Log("Settings saved.");
                 MessageBox.Show("Settings saved.", "AutoStart", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 form.Close();
@@ -315,9 +308,13 @@ namespace AutoStart
         {
             new Thread(() =>
             {
-                var info = CheckForUpdate();
-                if (info != null) ApplyUpdate(info);
-                else ShowBalloon("AutoStart", "No update available. Version: " + CURRENT_VERSION);
+                try
+                {
+                    var info = CheckForUpdate();
+                    if (info != null) ApplyUpdate(info);
+                    else ShowBalloon("AutoStart", "No verified newer update. Version: " + CURRENT_VERSION);
+                }
+                catch { ShowBalloon("AutoStart", "Update check failed. See the log for details.", ToolTipIcon.Error); }
             })
             { IsBackground = true }.Start();
         }
@@ -334,6 +331,7 @@ namespace AutoStart
         {
             _running = false;
             if (_tray != null) _tray.Visible = false;
+            _windowMonitor?.Dispose();
             Log("=== Exit requested by user ===");
             Application.Exit();
         }
@@ -345,13 +343,14 @@ namespace AutoStart
             {
                 try
                 {
+                    if (!_config.AutoUpdate) { SleepCancellable(1000); continue; }
                     var info = CheckForUpdate();
                     if (info != null)
                     {
                         Log("Update found: " + info.TagName);
                         ShowBalloon("AutoStart - Update", "New version: " + info.TagName + " Applying in 60s...");
                         for (int i = 0; i < 120 && _running; i++) Thread.Sleep(500);
-                        if (_running) ApplyUpdate(info);
+                        if (_running && _config.AutoUpdate) ApplyUpdate(info);
                     }
                     else
                     {
@@ -360,7 +359,8 @@ namespace AutoStart
                 }
                 catch (Exception ex) { Log("Update check error: " + ex.Message); }
                 // 6 saatte bir kontrol
-                for (int i = 0; i < 43200 && _running; i++) Thread.Sleep(500);
+                bool enabledAtStart = _config.AutoUpdate;
+                for (int i = 0; i < 43200 && _running && _config.AutoUpdate == enabledAtStart; i++) Thread.Sleep(500);
             }
         }
 
@@ -377,148 +377,67 @@ namespace AutoStart
                 Log("Checking update: " + url);
 
                 string json = client.GetStringAsync(url).GetAwaiter().GetResult();
-                using var doc = JsonDocument.Parse(json);
-                var root = doc.RootElement;
-
-                string tagName = root.GetProperty("tag_name").GetString() ?? "";
-                Log("Latest release tag: " + tagName + " | Current: " + CURRENT_VERSION);
-
-                if (!IsNewerVersion(tagName.TrimStart('v'), CURRENT_VERSION))
-                {
-                    Log("No update needed.");
-                    return null;
-                }
-
-                // Asset'lerde once ZIP ara, yoksa direkt EXE al
-                string dlUrl = "";
-                string assetName = "";
-                if (root.TryGetProperty("assets", out var assets))
-                {
-                    foreach (var asset in assets.EnumerateArray())
-                    {
-                        string name = asset.GetProperty("name").GetString() ?? "";
-                        string browserUrl = asset.GetProperty("browser_download_url").GetString() ?? "";
-                        Log("Asset found: " + name);
-                        if (name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
-                        {
-                            dlUrl = browserUrl;
-                            assetName = name;
-                            break;
-                        }
-                        // ZIP yoksa EXE al
-                        if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && string.IsNullOrEmpty(dlUrl))
-                        {
-                            dlUrl = browserUrl;
-                            assetName = name;
-                        }
-                    }
-                }
-
-                if (string.IsNullOrEmpty(dlUrl))
-                {
-                    Log("Update: no downloadable asset found in release.");
-                    return null;
-                }
-
-                Log("Update asset: " + assetName + " -> " + dlUrl);
-                return new UpdateInfo { TagName = tagName, DownloadUrl = dlUrl };
+                var update = UpdatePackage.Select(json, CURRENT_VERSION);
+                Log(update == null ? "No newer compatible release with a verified asset." : "Update available: " + update.TagName);
+                return update;
             }
             catch (Exception ex)
             {
                 Log("Update check failed: " + ex.Message);
-                return null;
+                throw;
             }
         }
 
         private void ApplyUpdate(UpdateInfo info)
         {
+            if (Interlocked.CompareExchange(ref _updateInProgress, 1, 0) != 0) return;
             string currentExe = Application.ExecutablePath;
-            string exeDir = Path.GetDirectoryName(currentExe) ?? AppDomain.CurrentDomain.BaseDirectory;
-            string backupPath = Path.Combine(exeDir, "AutoStart_backup.exe");
-            string tempZip = Path.Combine(exeDir, "AutoStart_update.zip");
+            string exeDir = Path.GetDirectoryName(currentExe)!;
             string tempPath = Path.Combine(exeDir, "AutoStart_new.exe");
-            Log("Applying update: " + info.TagName);
-            ShowBalloon("AutoStart", "Downloading update " + info.TagName + "...");
             try
             {
-                using var client = new HttpClient();
-                client.Timeout = TimeSpan.FromSeconds(120);
+                using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
                 client.DefaultRequestHeaders.Add("User-Agent", "AutoStart/" + CURRENT_VERSION);
                 byte[] bytes = client.GetByteArrayAsync(info.DownloadUrl).GetAwaiter().GetResult();
-                if (bytes.Length < 1024) throw new Exception("Downloaded file too small: " + bytes.Length + " bytes");
-                Log("Downloaded: " + bytes.Length + " bytes");
+                byte[] exe = UpdatePackage.VerifyAndExtract(bytes, info);
+                File.WriteAllBytes(tempPath, exe);
+                var fileVersion = FileVersionInfo.GetVersionInfo(tempPath).FileVersion;
+                if (!Version.TryParse(fileVersion, out var downloaded) ||
+                    downloaded.ToString(3) != new Version(info.TagName.TrimStart('v')).ToString(3))
+                    throw new InvalidDataException("Downloaded executable version does not match the release tag.");
 
-                bool isZip = info.DownloadUrl.EndsWith(".zip", StringComparison.OrdinalIgnoreCase);
-
-                if (isZip)
-                {
-                    File.WriteAllBytes(tempZip, bytes);
-                    if (File.Exists(tempPath)) File.Delete(tempPath);
-                    string tmpDir = Path.Combine(exeDir, "__as_tmp__");
-                    if (Directory.Exists(tmpDir)) Directory.Delete(tmpDir, true);
-                    ZipFile.ExtractToDirectory(tempZip, tmpDir);
-
-                    // ZIP icindeki ilk EXE'yi bul (isim ne olursa olsun)
-                    string? extractedExe = null;
-                    foreach (var f in Directory.GetFiles(tmpDir, "*.exe", SearchOption.AllDirectories))
-                    {
-                        extractedExe = f;
-                        Log("Found EXE in ZIP: " + Path.GetFileName(f));
-                        break;
-                    }
-                    if (extractedExe == null) throw new Exception("No EXE found inside ZIP.");
-                    File.Move(extractedExe, tempPath);
-                    try { Directory.Delete(tmpDir, true); } catch { }
-                    try { File.Delete(tempZip); } catch { }
-                }
-                else
-                {
-                    // Direkt EXE indirildi
-                    File.WriteAllBytes(tempPath, bytes);
-                }
-
-                Log("New EXE ready: " + new FileInfo(tempPath).Length + " bytes");
-
-                if (File.Exists(backupPath)) File.Delete(backupPath);
-                File.Copy(currentExe, backupPath);
-                Log("Backup created: " + backupPath);
-
-                // cmd.exe ile guncelleme - PS1 ExecutionPolicy sorununu bypass eder
-                string batPath = Path.Combine(exeDir, "update_helper.bat");
-                string bat = "@echo off\r\n"
-                    + "ping 127.0.0.1 -n 9 > nul\r\n"
-                    + "copy /Y \"" + tempPath + "\" \"" + currentExe + "\"\r\n"
-                    + "del \"" + tempPath + "\"\r\n"
-                    + "start \"\" \"" + currentExe + "\" --updated\r\n"
-                    + "del \"%~f0\"\r\n";
-                File.WriteAllText(batPath, bat, System.Text.Encoding.ASCII);
-                Log("Update helper written: " + batPath);
-
+                UpdateInstaller.Launch(currentExe);
+                Log("Verified update staged: " + info.TagName + "; installer started.");
                 _running = false;
-                Process.Start(new ProcessStartInfo
+                _syncCtx!.Post(_ =>
                 {
-                    FileName = "cmd.exe",
-                    Arguments = "/C \"" + batPath + "\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    WindowStyle = ProcessWindowStyle.Hidden
-                });
-                Thread.Sleep(500);
-                _syncCtx?.Post(_ => { if (_tray != null) _tray.Visible = false; Application.Exit(); }, null);
+                    _windowMonitor?.Dispose();
+                    if (_tray != null) _tray.Visible = false;
+                    Application.Exit();
+                }, null);
             }
             catch (Exception ex)
             {
                 Log("UPDATE ERROR: " + ex.Message);
-                try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
-                try { if (File.Exists(tempZip)) File.Delete(tempZip); } catch { }
                 ShowBalloon("AutoStart - Update Failed", ex.Message, ToolTipIcon.Error);
             }
+            finally { if (_running) Interlocked.Exchange(ref _updateInProgress, 0); }
         }
 
-        private static bool IsNewerVersion(string remote, string local)
+        internal static CyclerConfig CloneConfig(CyclerConfig cfg) => new CyclerConfig
         {
-            try { return new Version(remote) > new Version(local); }
-            catch { return false; }
+            ExePath = cfg.ExePath, RunMinutes = cfg.RunMinutes, OffMinutes = cfg.OffMinutes,
+            HeartbeatSeconds = cfg.HeartbeatSeconds, StopWaitSeconds = cfg.StopWaitSeconds,
+            AutoUpdate = cfg.AutoUpdate, MinimizeTarget = cfg.MinimizeTarget
+        };
+
+        internal static void NormalizeConfig(CyclerConfig cfg)
+        {
+            cfg.RunMinutes = Math.Clamp(cfg.RunMinutes, 1, 10080);
+            cfg.OffMinutes = Math.Clamp(cfg.OffMinutes, 0, 10080);
+            cfg.HeartbeatSeconds = Math.Clamp(cfg.HeartbeatSeconds, 1, 3600);
+            cfg.StopWaitSeconds = Math.Clamp(cfg.StopWaitSeconds, 1, 300);
+            if (TargetProcesses.SamePath(cfg.ExePath, Application.ExecutablePath)) cfg.ExePath = "";
         }
 
         private CyclerConfig LoadOrCreateConfig()
@@ -551,7 +470,9 @@ namespace AutoStart
         {
             try
             {
-                File.WriteAllText(_configPath, JsonSerializer.Serialize(cfg, new JsonSerializerOptions { WriteIndented = true }));
+                string staged = _configPath + ".tmp";
+                File.WriteAllText(staged, JsonSerializer.Serialize(cfg, new JsonSerializerOptions { WriteIndented = true }));
+                File.Move(staged, _configPath, overwrite: true);
             }
             catch (Exception ex) { Log("Config save error: " + ex.Message); }
         }
@@ -610,32 +531,35 @@ namespace AutoStart
                     continue;
                 }
 
+                CyclerConfig cycle = CloneConfig(_config);
+                _activeTargetPath = cycle.ExePath;
                 _cycleCount++;
                 Log("=== CYCLE " + _cycleCount + " START ===");
                 SetStatus("Cycle " + _cycleCount + " - launching EXE");
 
-                if (GetProcessCount() == 0)
+                if (GetProcessCount(cycle.ExePath) == 0)
                 {
-                    if (!StartExe("Cycle start"))
+                    if (!StartExe(cycle, "Cycle start"))
                     {
-                        Log("Launch failed. Waiting " + _config.OffMinutes + " min.");
+                        Log("Launch failed. Waiting " + cycle.OffMinutes + " min.");
                         SetStatus("Launch failed - waiting");
-                        SleepCancellable(_config.OffMinutes * 60 * 1000);
+                        SleepCancellable(Math.Max(1000, cycle.OffMinutes * 60 * 1000));
                         continue;
                     }
                 }
                 else Log("EXE already running.");
 
-                SetStatus("Cycle " + _cycleCount + " - running (" + _config.RunMinutes + " min)");
-                var runEnd = DateTime.UtcNow.AddSeconds(_config.RunMinutes * 60);
+                SetStatus("Cycle " + _cycleCount + " - running (" + cycle.RunMinutes + " min)");
+                var runEnd = DateTime.UtcNow.AddSeconds(cycle.RunMinutes * 60);
                 while (DateTime.UtcNow < runEnd && _running)
                 {
-                    SleepCancellable(_config.HeartbeatSeconds * 1000);
+                    int remaining = (int)Math.Max(0, (runEnd - DateTime.UtcNow).TotalMilliseconds);
+                    SleepCancellable(Math.Min(cycle.HeartbeatSeconds * 1000, remaining));
                     if (!_running) break;
-                    if (GetProcessCount() == 0)
+                    if (DateTime.UtcNow < runEnd && GetProcessCount(cycle.ExePath) == 0)
                     {
                         Log("Heartbeat: EXE gone, restarting");
-                        StartExe("Heartbeat restart");
+                        StartExe(cycle, "Heartbeat restart");
                     }
                 }
 
@@ -643,154 +567,64 @@ namespace AutoStart
 
                 Log("Run time elapsed. Stopping EXE.");
                 SetStatus("Cycle " + _cycleCount + " - stopping");
-                StopExe();
+                StopExe(cycle);
 
-                Log("Off phase: " + _config.OffMinutes + " min");
-                SetStatus("Cycle " + _cycleCount + " - off (" + _config.OffMinutes + " min)");
-                SleepCancellable(_config.OffMinutes * 60 * 1000);
+                Log("Off phase: " + cycle.OffMinutes + " min");
+                SetStatus("Cycle " + _cycleCount + " - off (" + cycle.OffMinutes + " min)");
+                SleepCancellable(cycle.OffMinutes * 60 * 1000);
             }
             Log("=== Worker stopped ===");
         }
 
-        private int GetProcessCount()
+        private static int GetProcessCount(string target)
         {
-            if (string.IsNullOrEmpty(_config.ExePath)) return 0;
-            string exeName = Path.GetFileNameWithoutExtension(_config.ExePath);
-            string targetLow = _config.ExePath.ToLowerInvariant();
-            int count = 0;
-            foreach (var p in Process.GetProcessesByName(exeName))
-            {
-                try
-                {
-                    string? fileName = null;
-                    try { fileName = p.MainModule?.FileName?.ToLowerInvariant(); } catch { }
-                    if (fileName == null || fileName == targetLow) count++;
-                }
-                catch { }
-                finally { p.Dispose(); }
-            }
+            var processes = TargetProcesses.Find(target);
+            int count = processes.Count;
+            foreach (var process in processes) process.Dispose();
             return count;
         }
 
-        // =====================================================================
-        // MINIMIZE FIX: ProcessWindowStyle.Minimized + agresif WinAPI retry
-        // =====================================================================
-        private bool StartExe(string reason)
+        private bool StartExe(CyclerConfig cycle, string reason)
         {
             Log("START: " + reason);
             try
             {
-                var psi = new ProcessStartInfo
+                using var process = Process.Start(new ProcessStartInfo
                 {
-                    FileName = _config.ExePath,
-                    WorkingDirectory = Path.GetDirectoryName(_config.ExePath),
-                    UseShellExecute = true,
-                    // OS seviyesinde minimize baslatma - pencere hic acilmadan minimize gelir
+                    FileName = cycle.ExePath,
+                    WorkingDirectory = Path.GetDirectoryName(cycle.ExePath),
+                    UseShellExecute = false,
                     WindowStyle = _config.MinimizeTarget ? ProcessWindowStyle.Minimized : ProcessWindowStyle.Normal
-                };
-                var p = Process.Start(psi);
-                Log("START OK PID=" + p?.Id);
-
-                if (_config.MinimizeTarget && p != null)
-                {
-                    var proc = p;
-                    new Thread(() =>
-                    {
-                        try
-                        {
-                            // Popup'i minimize et (kapatma - uygulama kapaniyor)
-                            MinimizePopupWindow("LP Online Order Services", 10);
-
-                            // Ana pencereyi minimize et (15 saniye)
-                            var deadline = DateTime.UtcNow.AddSeconds(15);
-                            bool minimized = false;
-                            while (DateTime.UtcNow < deadline && !minimized)
-                            {
-                                Thread.Sleep(200);
-                                try { proc.Refresh(); } catch { break; }
-
-                                IntPtr hwnd = IntPtr.Zero;
-                                try { hwnd = proc.MainWindowHandle; } catch { break; }
-
-                                if (hwnd != IntPtr.Zero && NativeMethods.IsWindowVisible(hwnd))
-                                {
-                                    NativeMethods.ShowWindow(hwnd, NativeMethods.SW_SHOWMINNOACTIVE);
-                                    Thread.Sleep(100);
-                                    NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MINIMIZE);
-                                    minimized = true;
-                                    Log("Window minimized (hwnd=" + hwnd + ")");
-                                }
-                            }
-                            if (!minimized) Log("Minimize: no visible window found in 15s (may be tray-only app)");
-                        }
-                        catch (Exception ex) { Log("Minimize thread error: " + ex.Message); }
-                        finally { try { proc.Dispose(); } catch { } }
-                    }) { IsBackground = true }.Start();
-                }
-                return true;
+                });
+                Log("START OK PID=" + process?.Id);
+                return process != null;
             }
             catch (Exception ex) { Log("START ERROR: " + ex.Message); return false; }
         }
 
-        // Belirtilen baslikli popup pencereyi minimize eder (kapatmaz)
-        private void MinimizePopupWindow(string windowTitle, int waitSeconds)
+        private void StopExe(CyclerConfig cycle)
         {
-            var deadline = DateTime.UtcNow.AddSeconds(waitSeconds);
-            while (DateTime.UtcNow < deadline)
+            var processes = TargetProcesses.Find(cycle.ExePath);
+            try
             {
-                Thread.Sleep(300);
-                IntPtr hwnd = NativeMethods.FindWindow(null, windowTitle);
-                if (hwnd != IntPtr.Zero && NativeMethods.IsWindowVisible(hwnd))
+                foreach (var process in processes)
+                    try { process.CloseMainWindow(); } catch { }
+                var deadline = DateTime.UtcNow.AddSeconds(cycle.StopWaitSeconds);
+                while (DateTime.UtcNow < deadline && _running)
                 {
-                    NativeMethods.ShowWindow(hwnd, NativeMethods.SW_SHOWMINNOACTIVE);
-                    Thread.Sleep(80);
-                    NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MINIMIZE);
-                    Log("Popup minimized: " + windowTitle);
-                    return;
+                    if (GetProcessCount(cycle.ExePath) == 0) return;
+                    Thread.Sleep(250);
                 }
+                if (!_running) return;
+                foreach (var process in processes)
+                    try
+                    {
+                        if (!process.HasExited && TargetProcesses.Matches(process.Id, cycle.ExePath))
+                        { process.Kill(); Log("STOP: killed verified target PID=" + process.Id); }
+                    }
+                    catch (Exception ex) { Log("STOP error: " + ex.Message); }
             }
-            Log("Popup not found: " + windowTitle);
-        }
-
-        private void StopExe()
-        {
-            if (string.IsNullOrEmpty(_config.ExePath)) return;
-            string exeName = Path.GetFileNameWithoutExtension(_config.ExePath);
-            string targetLow = _config.ExePath.ToLowerInvariant();
-            var procs = new System.Collections.Generic.List<Process>();
-            foreach (var p in Process.GetProcessesByName(exeName))
-            {
-                try
-                {
-                    string? fileName = null;
-                    try { fileName = p.MainModule?.FileName?.ToLowerInvariant(); } catch { }
-                    if (fileName == null || fileName == targetLow) procs.Add(p);
-                    else p.Dispose();
-                }
-                catch { p.Dispose(); }
-            }
-            if (procs.Count == 0) { Log("STOP: not running."); return; }
-            foreach (var p in procs)
-                try { if (p.MainWindowHandle != IntPtr.Zero) p.CloseMainWindow(); } catch { }
-            var deadline = DateTime.UtcNow.AddSeconds(_config.StopWaitSeconds);
-            while (DateTime.UtcNow < deadline)
-            {
-                Thread.Sleep(250);
-                if (GetProcessCount() == 0)
-                {
-                    Log("STOP: graceful OK");
-                    foreach (var p in procs) p.Dispose();
-                    return;
-                }
-            }
-            foreach (var p in procs)
-            {
-                try { p.Kill(); Log("STOP: killed PID=" + p.Id); }
-                catch (Exception ex) { Log("STOP kill error: " + ex.Message); }
-                finally { p.Dispose(); }
-            }
-            Thread.Sleep(500);
-            Log(GetProcessCount() == 0 ? "STOP: force kill OK." : "STOP: WARNING - process still running!");
+            finally { foreach (var process in processes) process.Dispose(); }
         }
 
         private void SleepCancellable(int ms)
