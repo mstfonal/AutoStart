@@ -3,6 +3,7 @@ name: Build
 on:
   push:
     branches: [ main ]
+  pull_request:
   release:
     types: [ published ]
 
@@ -14,38 +15,62 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
 
       - name: Get version
         id: version
-        shell: bash
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          if [[ "${{ github.event_name }}" == "release" ]]; then
-            TAG="${{ github.event.release.tag_name }}"
-          else
-            TAG="1.0.0"
-          fi
-          VERSION="${TAG#v}"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          [xml]$project = Get-Content src/AutoStart.csproj
+          $version = [string]$project.Project.PropertyGroup.Version
+          if ($env:RELEASE_TAG) {
+            if ($env:RELEASE_TAG -notmatch '^v?[0-9]+[.][0-9]+[.][0-9]+$') { throw 'Invalid release version' }
+            if ($env:RELEASE_TAG.TrimStart('v') -ne $version) { throw 'Release tag must match the source version' }
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Run regression and isolated Windows tests
+        shell: pwsh
+        run: |
+          dotnet run --project tests/AutoStart.Tests.csproj -c Release --no-launch-profile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Publish
-        run: dotnet publish src/AutoStart.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=${{ steps.version.outputs.version }} -p:AssemblyVersion=${{ steps.version.outputs.version }} -p:FileVersion=${{ steps.version.outputs.version }}
+        run: dotnet publish src/AutoStart.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o artifacts/publish
 
-      - name: Zip EXE
+      - name: Test published installer and rollback
         shell: pwsh
-        run: Compress-Archive -Path src/bin/Release/net8.0-windows/win-x64/publish/AutoStart.exe -DestinationPath src/bin/Release/net8.0-windows/win-x64/publish/AutoStart.zip
+        run: |
+          dotnet publish tests/AutoStart.Tests.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o artifacts/test-fixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/InstallerE2E.ps1
+
+      - name: Package and checksum
+        shell: pwsh
+        run: |
+          Compress-Archive -LiteralPath artifacts/publish/AutoStart.exe -DestinationPath artifacts/AutoStart.zip
+          $files = @('artifacts/publish/AutoStart.exe', 'artifacts/AutoStart.zip')
+          $files | ForEach-Object { $hash = Get-FileHash -LiteralPath $_ -Algorithm SHA256; "$($hash.Hash.ToLower())  $([IO.Path]::GetFileName($_))" } | Set-Content artifacts/SHA256SUMS.txt
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AutoStart
-          path: src/bin/Release/net8.0-windows/win-x64/publish/AutoStart.zip
+          name: AutoStart-${{ steps.version.outputs.version }}
+          path: |
+            artifacts/AutoStart.zip
+            artifacts/SHA256SUMS.txt
 
       - name: Upload to GitHub Release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            src/bin/Release/net8.0-windows/win-x64/publish/AutoStart.exe
-            src/bin/Release/net8.0-windows/win-x64/publish/AutoStart.zip
+            artifacts/publish/AutoStart.exe
+            artifacts/AutoStart.zip
+            artifacts/SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
