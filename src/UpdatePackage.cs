@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Reflection.PortableExecutable;
 using System.Security.Cryptography;
 using System.Text.Json;
 
@@ -49,9 +50,20 @@ namespace AutoStart
                 using var output = new MemoryStream();
                 source.CopyTo(output); exe = output.ToArray();
             }
-            if (exe.Length < 1024 || exe[0] != 'M' || exe[1] != 'Z')
-                throw new InvalidDataException("Update is not a Windows executable.");
+            ValidateExecutable(exe);
             return exe;
+        }
+
+        internal static void ValidateExecutable(byte[] exe)
+        {
+            try
+            {
+                using var reader = new PEReader(new MemoryStream(exe));
+                if (reader.PEHeaders.PEHeader?.Magic != PEMagic.PE32Plus ||
+                    reader.PEHeaders.CoffHeader.Machine != Machine.Amd64)
+                    throw new InvalidDataException("Update must be a Windows x64 executable.");
+            }
+            catch (BadImageFormatException ex) { throw new InvalidDataException("Invalid Windows executable.", ex); }
         }
 
     }

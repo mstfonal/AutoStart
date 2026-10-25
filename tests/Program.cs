@@ -36,7 +36,7 @@ static class Tests
             var clone = CyclerContext.CloneConfig(config); clone.ExePath = "changed.exe";
             Check(config.ExePath != clone.ExePath, "cycle configuration snapshot is independent");
 
-            byte[] exe = new byte[2048]; exe[0] = (byte)'M'; exe[1] = (byte)'Z';
+            byte[] exe = File.ReadAllBytes(Environment.ProcessPath!);
             string digest = "sha256:" + Convert.ToHexString(SHA256.HashData(exe)).ToLowerInvariant();
             string Release(string tag = "v1.0.20", string name = "AutoStart.exe", string? url = null, string? hash = null, bool prerelease = false)
                 => JsonSerializer.Serialize(new { tag_name = tag, draft = false, prerelease,
@@ -58,6 +58,10 @@ static class Tests
             bool rejected = false;
             try { UpdatePackage.VerifyAndExtract(damaged, info!); } catch (InvalidDataException) { rejected = true; }
             Check(rejected, "tampered update rejected before installation");
+            var invalidExe = new byte[] { (byte)'M', (byte)'Z', 0 };
+            rejected = false;
+            try { UpdatePackage.ValidateExecutable(invalidExe); } catch (InvalidDataException) { rejected = true; }
+            Check(rejected, "invalid executable rejected without asking Windows to launch it");
 
             byte[] Zip(string name)
             {
@@ -93,6 +97,11 @@ static class Tests
             try { UpdateInstaller.InstallFiles(target, target, backup, _ => {}, _ => {}); } catch (IOException) { rejected = true; }
             Check(rejected && File.ReadAllBytes(target).SequenceEqual(old), "aliased updater paths rejected without mutation");
             Check(UpdateInstaller.Run(new[] { "--install-update", target, "invalid" }) == 2, "malformed installer invocation rejected");
+            File.WriteAllBytes(staged, invalidExe);
+            rejected = false;
+            try { UpdateInstaller.InstallFiles(target, staged, backup, _ => throw new Exception("Must not launch"), _ => {}); }
+            catch (InvalidDataException) { rejected = true; }
+            Check(rejected && File.ReadAllBytes(target).SequenceEqual(old), "installer rejects corrupt staging before replacing or launching target");
 
             NativeWindows();
             Console.WriteLine("ALL " + _checks + " CHECKS PASSED");

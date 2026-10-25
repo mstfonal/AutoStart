@@ -77,7 +77,9 @@ namespace AutoStart
             // This method only writes the three explicitly supplied regular files. No recursive cleanup.
             if (TargetProcesses.SamePath(target, staged) || TargetProcesses.SamePath(target, backup) ||
                 TargetProcesses.SamePath(staged, backup)) throw new IOException("Update paths must be distinct.");
-            byte[] expected = SHA256.HashData(File.ReadAllBytes(staged));
+            byte[] stagedBytes = File.ReadAllBytes(staged);
+            UpdatePackage.ValidateExecutable(stagedBytes);
+            byte[] expected = SHA256.HashData(stagedBytes);
             File.Copy(target, backup, overwrite: true);
             bool replacementAttempted = false;
             try
